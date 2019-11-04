@@ -36,7 +36,8 @@ snd_pcm_t *handle;
 
 void logTrans(int pin, int edge, unsigned int actTime) {
   static struct timing_t {
-    int lastEdge, lastUp, lastDown;
+    int lastEdge;
+    unsigned int lastUp, lastDown;
   } timings[2] = {{0,0,0}, {0,0,0}}, *timing;
   int lastPeriod;
   double *freq;
@@ -186,6 +187,10 @@ int main(int argc, char* argv[]) {
     } else
       old_ns = tv.tv_nsec;
 
+    // Adjust offset freq if -ve beat detected!
+    if (pitch_if<baseLineP) baseLineP = pitch_if;
+    if (vol_if<baseLineV) baseLineV = vol_if;
+    
     phaseIncr = (1*(pitch_if-baseLineP))/PCM_RATE;
     volAdj = (exp(-(vol_if-baseLineV)/250)*vol - curVol)/TWEET;
     // adjust volume gradually over batch to avoid crackle
