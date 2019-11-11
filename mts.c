@@ -15,14 +15,16 @@
 #include <unistd.h>
 
 #include <sys/param.h>
-  // from pcm_min.c
 #include <alsa/asoundlib.h>
-static char *device = "default";            /* playback device */
-snd_output_t *output = NULL;
+  // from pcm_min.c
+
 #define PCM_RATE 44100
 #define TWEET 311 // no common factor with alsa bite of 441
-#define IF_MIN 2000 // freq offset of reference oscs at idle
-#define IF_MAX 20000 // biggest offset it can cope with
+
+// for custom hardware
+#define UNCERTAINTY 50000 // of osc freqs
+#define IF_MIN 3000 // freq offset of reference oscs at idle
+#define IF_MAX 25000 // biggest offset it can cope with
 #define SUBSAMPLE 1 // set higher to check osc cycles periodically
 
 // gpio pins
@@ -30,9 +32,9 @@ snd_output_t *output = NULL;
 #define REF_V 6
 #define SENS_P 10
 #define SENS_V 27
+#define TIMECONST 0.04
 
-double pitch_if = IF_MIN, vol_if = IF_MIN;
-snd_pcm_t *handle;
+double pitch_if, vol_if;
 
 void logTrans(int pin, int edge, unsigned int actTime) {
   static struct timing_t {
@@ -41,7 +43,6 @@ void logTrans(int pin, int edge, unsigned int actTime) {
   } timings[2] = {{0,0,0}, {0,0,0}}, *timing;
   int lastPeriod;
   double *freq;
-  static double timeConst = 0.02;
 
   // load context appropriate to current pin
   if (pin==SENS_P) {
@@ -53,10 +54,10 @@ void logTrans(int pin, int edge, unsigned int actTime) {
   }
   
   if (timing->lastUp == timing->lastDown) // first go, set up context
-    timing->lastUp = timing->lastDown = actTime - 1e6/IF_MIN;
+    timing->lastUp = timing->lastDown = actTime - 1e6/IF_MAX;
   
-  if (edge==timing->lastEdge || // debounce clock jitter
-      actTime - (edge==RISING_EDGE?timing->lastDown:timing->lastUp) < 0.05e6/(*freq)) return;
+//  if (edge==timing->lastEdge || // old debounce clock jitter
+//      actTime - (edge==RISING_EDGE?timing->lastDown:timing->lastUp) < 0.1e6/(*freq)) return;
   
   timing->lastEdge = edge;
   if (edge == RISING_EDGE) {
@@ -68,10 +69,12 @@ void logTrans(int pin, int edge, unsigned int actTime) {
   }
 
   // adjust frequency estimate
-  if (lastPeriod > 1e6*timeConst)
+  if (lastPeriod > 1e6*TIMECONST)
     *freq = 1e6/lastPeriod;
   else
-    *freq = (1-(1e-6*lastPeriod/timeConst))*(*freq) + 1/timeConst;
+    *freq = (1-(1e-6*lastPeriod/TIMECONST))*(*freq) + 1/TIMECONST;
+// debounce clock jitter v2
+  gpioGlitchFilter(pin, (int)(0.05e6/(*freq)));
 }
 
 double calibrate(int pin, int guess, double* freq) {  // try to find osc freq
@@ -79,18 +82,19 @@ double calibrate(int pin, int guess, double* freq) {  // try to find osc freq
   double low = 0, high = 0;
   int base = 0, top = 0, i, b;
   tv.tv_sec = 0;
-  tv.tv_nsec = 100000000;
+  tv.tv_nsec = (int)(4e9*TIMECONST);
   
   b = guess;
   printf("Calibrating pin %d to %d\n", pin, guess);
-  *freq = IF_MAX;
-  for (i=b-50000; i<=b+50000;i += IF_MAX-IF_MIN) { // range to search --
+  for (i=b-UNCERTAINTY; i<=b+UNCERTAINTY;i += IF_MAX-IF_MIN) { 
+    // range over which to search --
     // increment equal to useful range so one reading will be within
+    *freq = UNCERTAINTY;
     gpioHardwareClock(pin, i/SUBSAMPLE);
     nanosleep(&tv, NULL); // delay 0.1 sec to home to frequency
 
+    printf("Hit %lf at %d\n", *freq, i);
     if (*freq >= IF_MIN && *freq < IF_MAX) { // a valid reading
-      printf("Hit %lf at %d\n", *freq, i);
       if (low == 0) { // first one, clock is below osc freq
 	low = *freq;
 	base = i;
@@ -119,7 +123,6 @@ void sig_handler(int signo)
       signo == SIGCONT || signo == SIGTERM) {
     printf("received a %d, shutting down\n", signo);
     printf("\n");
-    snd_pcm_close(handle);
 
     gpioHardwareClock(REF_P, 0);
     gpioHardwareClock(REF_V, 0);
@@ -139,6 +142,7 @@ int main(int argc, char* argv[]) {
   int err;
   unsigned int i, old_ns = 0;
   snd_pcm_sframes_t frames;
+  snd_pcm_t *handle;
 
   gpioInitialise();
   
@@ -156,15 +160,16 @@ int main(int argc, char* argv[]) {
   gpioSetMode(SENS_V, PI_INPUT);
 
   gpioSetAlertFunc(SENS_P, logTrans);
-  gpioSetAlertFunc(SENS_V, logTrans);
-
   baseLineP = calibrate(REF_P, 550000, &pitch_if);
+
+  gpioSetAlertFunc(SENS_V, logTrans);
   baseLineV = calibrate(REF_V, 500000, &vol_if);
   
-  if ((err = snd_pcm_open(&handle, device, SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
+  if ((err = snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0)) < 0)
+    {
     printf("Playback open error: %s\n", snd_strerror(err));
     exit(EXIT_FAILURE);
-  }
+    }
   if ((err = snd_pcm_set_params(handle,
 				SND_PCM_FORMAT_S16_LE,
 				SND_PCM_ACCESS_RW_INTERLEAVED,
@@ -175,7 +180,7 @@ int main(int argc, char* argv[]) {
     printf("Playback open error: %s\n", snd_strerror(err));
     exit(EXIT_FAILURE);
   }
-
+  
   for (;;) {
     struct timespec tv;
     clock_gettime(CLOCK_MONOTONIC_RAW, &tv);
@@ -212,4 +217,5 @@ int main(int argc, char* argv[]) {
     if (frames > 0 && frames < TWEET)
       printf("Short write (expected %li, wrote %li)\n", TWEET, frames);
   }
+  return 0;
 }
