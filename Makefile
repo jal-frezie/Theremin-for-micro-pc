@@ -3,14 +3,16 @@ VOICE = autotune.wav prange.wav standby.wav tuning.wav \
 
 all: mts $(VOICE)
 
+ultra: umts $(VOICE)
+
+umts: mtp.o uts.o wiringPiSPI.o
+	gcc -o umts uts.o mtp.o wiringPiSPI.o -lpthread -lasound -lm
+
 mts: mts.o mtp.o
 	gcc -o mts mts.o mtp.o -lpigpio -lasound -lm
 
-mtp.o: mtp.c
-	gcc -c -o mtp.o mtp.c
-
-mts.o: mts.c
-	gcc -c -o mts.o mts.c
+%.o: %.c
+	gcc -c $<
 
 install:
 	chown root:audio mts
@@ -18,3 +20,10 @@ install:
 	mv mts /usr/local/bin
 	mkdir -p /usr/local/lib/mts
 	cp $(VOICE) /usr/local/lib/mts
+
+install_ultra:
+        mv umts /usr/local/bin/mts
+        mkdir -p /usr/local/lib/mts
+        cp $(VOICE) /usr/local/lib/mts
+
+
