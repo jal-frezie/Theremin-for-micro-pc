@@ -17,7 +17,6 @@
   // from pcm_min.c
 
 #define PCM_RATE 44100
-#define TWEET 311 // no common factor with alsa bite of 441
 
 #define TOUCHED		12000 // IF exceeded if antenna is touched
 #define TOUCH_P         1 // flags to set if antennae touched
@@ -45,11 +44,13 @@
 #define CONTINUOUS      0
 #define CHROMATIC       1
 #define MAJOR           2
-#define FLOYDIAN        3
-#define ARPEGGIO        4
-#define AEOLIAN         5
+#define BLACK           3
+#define FLOYDIAN        4
+#define ARPEGGIO        5
+#define AEOLIAN         6
 
 void setupSensing();
+void getTSs(int*, int*);
 void getIFs(int*, int*);
 /* include to use sensed values from stdin/stdout 
 void setupSensing() {};
@@ -84,14 +85,14 @@ int main(int argc, char* argv[]) {
     *current, *next;
   // pthread_t thread_id;
 
-  int16_t buffer[TWEET];
+  int16_t buffer[PCM_RATE/25]; // 40ms worth, overkill
   int touching = 0, touched = 0, state = PLAY, nextState;
   char *curDesc, *nxtDesc, *nxtSpeak;
   FILE* speech = NULL;
 
   // from pcm_min.c
   int err;
-  unsigned int i, old_ns = 0;
+  unsigned int i, ns_p, ns_v, old_sample = 0, old_ns = 0, req_ms, sendSiz;
   snd_pcm_sframes_t frames;
   snd_pcm_t *handle;
 
@@ -119,15 +120,20 @@ int main(int argc, char* argv[]) {
   }
   speech = say("play.wav");
   for (;;) {
-    clock_gettime(CLOCK_MONOTONIC_RAW, &tv);
-    if ((tv.tv_nsec-old_ns)%1000000000 < 2e6) { // if less than 2ms elapsed...
-      tv.tv_sec = 0;
-      tv.tv_nsec = (1e9/PCM_RATE)*(TWEET*2/3);
-      nanosleep(&tv, NULL); // pause through most of data just sent
-      // to make sure next batch is at new frequency
-    } else
-      old_ns = tv.tv_nsec;
-
+    req_ms = 0;
+    
+    getTSs(&ns_p, &ns_v);
+    tv.tv_sec = 0;
+    tv.tv_nsec = 2e6;
+    while (ns_p == old_ns) {
+      nanosleep(&tv, NULL);
+      req_ms += 2;
+      getTSs(&ns_p, &ns_v);
+    }
+    old_ns = ns_p;
+    // now have new pitch value
+    sendSiz = (7 + req_ms)*PCM_RATE/1000; // amount of data to send
+    
     getIFs(&pitch_if, &vol_if);
     // Adjust offset freq if -ve beat detected! (only if both beats slow)
     if (pitch_if<baseLineP && vol_if-baseLineV < 1000) {
@@ -243,8 +249,9 @@ int main(int argc, char* argv[]) {
       vol = (int)(100*tgtVol);
       break;
     case SET_TONE:
-      // currentTone = (int)(log(vol_if-baseLineV)*2) - 8;
-      currentTone = (vol_if-baseLineV)/200;
+      currentTone = (int)(log(1+vol_if-baseLineV)*2) - 8;
+      if (currentTone < SINE) currentTone = SINE;
+      // currentTone = (vol_if-baseLineV)/200;
       break;
     case SET_PITCH:
       pitch = 10 + (vol_if-baseLineV)/20;
@@ -253,8 +260,9 @@ int main(int argc, char* argv[]) {
       pRange = 10 + (vol_if-baseLineV)/20;
       break;
     case AUTOTUNE:
-      autotune = (vol_if-baseLineV)/200;
+      autotune = (int)(log(1+vol_if-baseLineV)*2) - 8;
       if (autotune>AEOLIAN) autotune = AEOLIAN;
+      if (autotune<CONTINUOUS) autotune = CONTINUOUS;
       break;
     case TUNING:
       tuning = 300 + (vol_if-baseLineV)/5;
@@ -268,6 +276,10 @@ int main(int argc, char* argv[]) {
     case MAJOR:
       wrk = round(7*log(tgtPitch)/log(2));
       tgtPitch = exp(log(2)*((12*wrk+2)/7)/12.0);
+      break;
+    case BLACK:
+      wrk = round(5*log(tgtPitch)/log(2));
+      tgtPitch = exp(log(2)*((12*wrk-3)/5)/12.0);
       break;
     case FLOYDIAN:
       tgtPitch = exp(log(2)*round(4*log(tgtPitch)/log(2))/4);
@@ -283,8 +295,8 @@ int main(int argc, char* argv[]) {
     tgtPitch = tuning*tgtPitch/4096;
     
     if (speech) {
-      i = fread(buffer, 2, TWEET, speech);
-      if (i<TWEET) {
+      i = fread(buffer, 2, sendSiz, speech);
+      if (i<sendSiz) {
 	fclose(speech);
 	speech = NULL;
       }
@@ -292,18 +304,18 @@ int main(int argc, char* argv[]) {
       i=0;
 
     if (autotune == CONTINUOUS) // change pitch smoothly through buffer
-      pitchAdj = (tgtPitch - curPitch)/TWEET;
+      pitchAdj = (tgtPitch - curPitch)/sendSiz;
     else { // change pitch abruptly
       curPitch = tgtPitch;
       pitchAdj = 0;
     }
-    volAdj = (tgtVol - curVol)/TWEET;
+    volAdj = (tgtVol - curVol)/sendSiz;
     // adjust volume gradually over batch to avoid crackle --
     // if buffer part full of speech, jump to that point
     curPitch += i*pitchAdj;
     curVol += i*volAdj;
     
-    for (; i<TWEET; ++i) {
+    for (; i<sendSiz; ++i) {
       curPitch += pitchAdj;
       phaseIncr = curPitch/PCM_RATE;
       phase = fmod(phase+phaseIncr,1.0);
@@ -330,15 +342,15 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    frames = snd_pcm_writei(handle, buffer, TWEET);
+    frames = snd_pcm_writei(handle, buffer, sendSiz);
     if (frames < 0)
       frames = snd_pcm_recover(handle, frames, 0);
     if (frames < 0) {
       fprintf(stderr, "snd_pcm_writei failed: %s\n", snd_strerror(frames));
       break;
     }
-    if (frames > 0 && frames < TWEET)
-      fprintf(stderr, "Short write (expected %li, wrote %li)\n", TWEET, frames);
+    if (frames > 0 && frames < sendSiz)
+      fprintf(stderr, "Short write (expected %li, wrote %li)\n", sendSiz, frames);
   }
   return 0;
 }

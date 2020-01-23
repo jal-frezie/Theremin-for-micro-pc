@@ -20,7 +20,7 @@
 
 volatile int rateP, rateV;
 volatile double pitch_if = 3000, vol_if = 3000;
-int fails = 8192;
+volatile struct timespec pitch_ts, vol_ts;
 
 // avoid need to link all of wiringPi
 int wiringPiFailure(int msg, char* full, char* rest) {
@@ -64,6 +64,7 @@ int find_transition(int side, char bufr[], int toChk, int current) {
 
 void* readOscs (void* dump) {
   int side, chnl, res, rate, current, toChk, cycles, period;
+  struct timespec *tv;
   volatile double *freq;
   unsigned char bufr[SPI_BUF];
 
@@ -72,16 +73,19 @@ void* readOscs (void* dump) {
     if (side) {
       rate = rateV;
       freq = &vol_if;
+      tv = &vol_ts;
     } else {
       rate = rateP;
       freq = &pitch_if;
+      tv = &pitch_ts;
     }
 
 // get data from my wiringpi -- side now selects module not chip
    chnl = wiringPiSPISetup(side, FASTCLK/rate);
    res = wiringPiSPIDataRW(side, bufr, SPI_BUF);
    close(chnl);
-  
+   clock_gettime(CLOCK_MONOTONIC_RAW, tv);
+
     if (res < SPI_BUF) {
       printf("Only got %d bytes!\n", res);
       continue;
@@ -114,6 +118,11 @@ void* readOscs (void* dump) {
 void getIFs(int *p, int *v) {
   *p = (int)pitch_if;
   *v = (int)vol_if;
+}
+
+void getTSs(int *p, int *v) {
+  *p = pitch_ts.tv_nsec;
+  *v = vol_ts.tv_nsec;
 }
 
 void calibrate(int guess0, int guess1) {  // try to find osc freq

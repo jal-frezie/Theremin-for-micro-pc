@@ -32,6 +32,7 @@
 #define TIMECONST 0.04
 
 double pitch_if, vol_if;
+struct timespec pitch_ts, vol_ts;
 
 void logTrans(int pin, int edge, unsigned int actTime) {
   static struct timing_t {
@@ -40,14 +41,17 @@ void logTrans(int pin, int edge, unsigned int actTime) {
   } timings[2] = {{0,0,0}, {0,0,0}}, *timing;
   int lastPeriod;
   double *freq;
+  struct timespec *tv;
 
   // load context appropriate to current pin
   if (pin==SENS_P) {
     freq = &pitch_if;
     timing = timings;
+    tv = &pitch_ts;
   } else {
     freq = &vol_if;
     timing = timings + 1;
+    tv = &vol_ts;
   }
   
   if (timing->lastUp == timing->lastDown) // first go, set up context
@@ -56,7 +60,9 @@ void logTrans(int pin, int edge, unsigned int actTime) {
   if (edge==timing->lastEdge || // old debounce clock jitter
       actTime - (edge==RISING_EDGE?timing->lastDown:timing->lastUp) < 0.1e6/(*freq))
     return;
-  
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, tv);
+
   timing->lastEdge = edge;
   if (edge == RISING_EDGE) {
     lastPeriod = actTime - timing->lastUp;
@@ -162,6 +168,11 @@ void setupSensing() {
 void getIFs(int *p, int *v) {
   *p = pitch_if;
   *v = vol_if;
+}
+
+void getTSs(int *p, int *v) {
+  *p = pitch_ts.tv_nsec;
+  *v = vol_ts.tv_nsec;
 }
 /* Include this to serve sensed values to stdin/stdout 
 int main () {
